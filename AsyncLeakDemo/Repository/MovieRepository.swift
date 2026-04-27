@@ -1,5 +1,5 @@
 import Foundation
 
-protocol MovieRepository {
-    func save(_ title: MovieTitle) throws
+protocol MovieRepository: Sendable {
+    func save(_ title: MovieTitle) async throws
 }

@@ -14,11 +14,11 @@ final class AddFavoriteViewModel {
         self.useCase = useCase
     }
 
-    func save() {
+    func save() async {
         isSaving = true
         defer { isSaving = false }
         do {
-            let title = try useCase.execute(rawTitle)
+            let title = try await useCase.execute(rawTitle)
             status = "Saved: \(title.value)"
         } catch {
             status = error.localizedDescription

@@ -13,7 +13,7 @@ struct AddFavoriteView: View {
                 .autocorrectionDisabled()
 
             Button {
-                viewModel.save()
+                Task { await viewModel.save() }
             } label: {
                 HStack {
                     if viewModel.isSaving {
