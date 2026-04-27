@@ -9,16 +9,20 @@ final class AddFavoriteViewModel {
     var isSaving: Bool = false
 
     private let useCase: AddFavoriteUseCase
+    private let dispatcher: any Dispatcher
 
-    init(useCase: AddFavoriteUseCase) {
+    init(useCase: AddFavoriteUseCase, dispatcher: any Dispatcher) {
         self.useCase = useCase
+        self.dispatcher = dispatcher
     }
 
     func save() async {
+        let raw = rawTitle
+        let useCase = self.useCase
         isSaving = true
         defer { isSaving = false }
         do {
-            let title = try await useCase.execute(rawTitle)
+            let title = try await dispatcher.run { try useCase.execute(raw) }
             status = "Saved: \(title.value)"
         } catch {
             status = error.localizedDescription

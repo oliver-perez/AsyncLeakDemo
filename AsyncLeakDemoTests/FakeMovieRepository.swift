@@ -1,10 +1,10 @@
 import Foundation
 @testable import AsyncLeakDemo
 
-actor FakeMovieRepository: MovieRepository {
+final class FakeMovieRepository: MovieRepository {
     private(set) var saved: [MovieTitle] = []
 
-    func save(_ title: MovieTitle) async throws {
+    func save(_ title: MovieTitle) throws {
         saved.append(title)
     }
 }

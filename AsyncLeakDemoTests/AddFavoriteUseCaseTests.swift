@@ -3,44 +3,42 @@ import Testing
 
 struct AddFavoriteUseCaseTests {
 
-    @Test func savesValidTitle() async throws {
+    @Test func savesValidTitle() throws {
         let repo = FakeMovieRepository()
         let useCase = AddFavoriteUseCase(repository: repo)
 
-        let title = try await useCase.execute("Inception")
+        let title = try useCase.execute("Inception")
 
         #expect(title.value == "Inception")
-        let saved = await repo.saved
-        #expect(saved == [title])
+        #expect(repo.saved == [title])
     }
 
-    @Test func trimsWhitespace() async throws {
+    @Test func trimsWhitespace() throws {
         let repo = FakeMovieRepository()
         let useCase = AddFavoriteUseCase(repository: repo)
 
-        let title = try await useCase.execute("  Dune  ")
+        let title = try useCase.execute("  Dune  ")
 
         #expect(title.value == "Dune")
     }
 
-    @Test func rejectsTooShort() async {
+    @Test func rejectsTooShort() {
         let repo = FakeMovieRepository()
         let useCase = AddFavoriteUseCase(repository: repo)
 
-        await #expect(throws: ValidationError.tooShort) {
-            try await useCase.execute("I")
+        #expect(throws: ValidationError.tooShort) {
+            try useCase.execute("I")
         }
-        let saved = await repo.saved
-        #expect(saved.isEmpty)
+        #expect(repo.saved.isEmpty)
     }
 
-    @Test func rejectsTooLong() async {
+    @Test func rejectsTooLong() {
         let repo = FakeMovieRepository()
         let useCase = AddFavoriteUseCase(repository: repo)
         let longTitle = String(repeating: "A", count: 101)
 
-        await #expect(throws: ValidationError.tooLong) {
-            try await useCase.execute(longTitle)
+        #expect(throws: ValidationError.tooLong) {
+            try useCase.execute(longTitle)
         }
     }
 }
