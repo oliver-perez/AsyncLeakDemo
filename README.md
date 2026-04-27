@@ -1,155 +1,290 @@
 # AsyncLeakDemo
 
-Companion code for the talk **"When async/await leaks into your domain layer"** ([Medium article](https://medium.com/@oliverperez.e/when-asynchrony-leaks-into-your-domain-layer-6204f03b4663)).
+A small SwiftUI iOS app that demonstrates how `async/await` can quietly contaminate a domain layer — and how to keep it out.
 
-The app is a one-screen SwiftUI demo that adds movie titles to a favorites list with simulated 1.5s "DB" latency. Each architectural stage lives on its own branch — switch between branches (or compare them with `git diff`) to watch async contamination spread and contract.
+The example is deliberately tiny (one screen, one use case) so the architectural shift between branches is the focus, not the application logic. Each branch is a self-contained iOS project that builds, runs, and passes its tests; switching between branches lets you see the same feature implemented under four different architectural choices.
 
-## Stages
+> Background reading: [*When asynchrony leaks into your domain layer*](https://medium.com/@oliverperez.e/when-asynchrony-leaks-into-your-domain-layer-6204f03b4663) (Medium).
 
-| Branch                            | Tag           | Architecture        | UX                                                            |
-| --------------------------------- | ------------- | ------------------- | ------------------------------------------------------------- |
-| `stage-1-sync-baseline`           | `v1-sync`     | ✅ Correct, sync     | ❌ UI freezes for 1.5s — even the spinner can't animate        |
-| `stage-2-async-leak`              | `v2-leak`     | ❌ Contaminated      | ✅ Smooth — but `async` has spread everywhere                  |
-| `stage-3-dispatcher-fix`          | `v3-fix`      | ✅ Correct, sync     | ✅ Smooth (cooperative pool at risk under blocking I/O)        |
-| `stage-4-execution-strategies`    | `v4-execution`| ✅ Correct, sync     | ✅ Smooth, GCD-backed — pool-safe for blocking I/O             |
-| `main`                            | —             | = `stage-4`         | Production-honest default                                     |
+## TL;DR
 
-## The slides this code is built for
+Asynchrony is an *infrastructure* concern. Most domain logic — validation, calculation, decision-making — is synchronous by nature. When a repository or service is implemented with `async` functions, the `async` keyword tends to propagate upward into use cases, view models, views, and tests, even though those layers are not doing any inherently asynchronous work. This repo shows the propagation happening, then shows a small `Dispatcher` abstraction that contains async at the boundary so the rest of the app can stay synchronous.
 
-**The contamination slide.** Open `Domain/AddFavoriteUseCase.swift` on `stage-2-async-leak` and ask:
+## The four stages
 
-> *What inside this function actually needs to suspend? Trimming a string? A length check?*
->
-> *We didn't introduce concurrency. We introduced syntax.*
+Each stage is a long-lived branch and a tag. The repo's `main` is identical to `stage-4-execution-strategies` plus this README.
 
-**The killer slide.** Diff the test file between Stage 1 and Stage 2:
+| Branch                            | Tag             | Architecture        | Behaviour                                                        |
+| --------------------------------- | --------------- | ------------------- | ---------------------------------------------------------------- |
+| `stage-1-sync-baseline`           | `v1-sync`       | Synchronous         | UI freezes for ~1.5s while the repository simulates a slow save  |
+| `stage-2-async-leak`              | `v2-leak`       | Async propagated    | UI stays responsive, but `async` has spread through every layer  |
+| `stage-3-dispatcher-fix`          | `v3-fix`        | Sync + Dispatcher   | UI responsive, domain restored to synchronous code               |
+| `stage-4-execution-strategies`    | `v4-execution`  | Sync + GCD adapter  | Same architecture as Stage 3, swapped to a non-cooperative queue |
 
-```sh
-git diff v1-sync v2-leak -- AsyncLeakDemoTests/AddFavoriteUseCaseTests.swift
+## Architecture, visualised
+
+The same feature — *add a movie title to favorites* — is implemented in three architecturally different ways across the four stages. The diagrams below trace where async lives in each.
+
+### Stage 1 — synchronous everywhere
+
+The cleanest architecture, but the repository's blocking call sits on the main thread, freezing the UI.
+
+```mermaid
+flowchart LR
+    V[View<br/>Button tap] --> VM[ViewModel.save]
+    VM --> UC[AddFavoriteUseCase.execute]
+    UC --> R[InMemoryMovieRepository.save]
+    R -.->|Thread.sleep blocks<br/>main thread| MAIN((Main thread))
+
+    classDef sync fill:#d4edda,stroke:#155724,color:#000
+    classDef block fill:#f8d7da,stroke:#721c24,color:#000
+    class V,VM,UC sync
+    class R block
 ```
 
-Same test. ~2.5× longer. Three new keywords. One new actor. *"Nothing in this test is asynchronous by nature."*
+### Stage 2 — async propagated everywhere
 
-**The mic-drop slide.** Diff the domain and tests between Stage 1 and Stage 3:
+The repository was made `async`. The compiler then *required* `async` on every type that calls it, including types whose work is purely synchronous.
 
-```sh
-git diff v1-sync v3-fix -- AsyncLeakDemo/Domain/ AsyncLeakDemo/Repository/ AsyncLeakDemoTests/
+```mermaid
+flowchart LR
+    V["View<br/>Button { Task { await ... } }"] --> VM["ViewModel.save() async"]
+    VM --> UC["UseCase.execute(...) async throws"]
+    UC --> R["Repository.save(...) async throws"]
+
+    classDef contaminated fill:#fff3cd,stroke:#856404,color:#000
+    class V,VM,UC,R contaminated
 ```
 
-Empty diff. Same domain. Same tests. *"Async lives in `Dispatcher`. The domain doesn't know it exists."*
+The validation logic in `AddFavoriteUseCase` does not actually need to suspend — there is nothing asynchronous about trimming a string and checking its length. The `async` keyword is present only because the call to `repository.save` demands it. The same pattern then appears in tests, which become async out of obligation rather than need.
 
-**The closing slide.** Diff the composition root between Stage 3 and Stage 4:
+### Stages 3 and 4 — async at the boundary
+
+A `Dispatcher` port is introduced. The domain and repository revert to synchronous code. The view model holds a `Dispatcher` and bridges from main-actor async to a synchronous call:
+
+```swift
+let title = try await dispatcher.run { try useCase.execute(raw) }
+```
+
+```mermaid
+flowchart LR
+    subgraph Async ["Imperative shell (async)"]
+        V["View<br/>Button { Task { ... } }"]
+        VM["ViewModel.save() async"]
+        D["Dispatcher.run<br/>(SwiftConcurrency or GCD)"]
+    end
+
+    subgraph Sync ["Functional core (sync)"]
+        UC["UseCase.execute(...) throws"]
+        R["Repository.save(...) throws"]
+    end
+
+    V --> VM --> D
+    D -->|"crosses the boundary"| UC
+    UC --> R
+
+    classDef async fill:#fff3cd,stroke:#856404,color:#000
+    classDef synced fill:#d4edda,stroke:#155724,color:#000
+    class V,VM,D async
+    class UC,R synced
+```
+
+Stage 4 differs from Stage 3 only in *which* `Dispatcher` adapter is wired up at the composition root.
+
+### Ports and adapters
+
+The hexagonal view of the final architecture:
+
+```mermaid
+flowchart TB
+    subgraph Hex ["Domain core (synchronous)"]
+        UC[AddFavoriteUseCase]
+        MT[MovieTitle]
+        VE[ValidationError]
+    end
+
+    subgraph Ports ["Ports (protocols)"]
+        MR[MovieRepository]
+        DP[Dispatcher]
+    end
+
+    subgraph Adapters ["Adapters (implementations)"]
+        IMR[InMemoryMovieRepository]
+        SCD[SwiftConcurrencyDispatcher]
+        GCD[GCDDispatcher]
+    end
+
+    subgraph Driving ["Driving side (UI)"]
+        VW[AddFavoriteView]
+        VM[AddFavoriteViewModel]
+    end
+
+    VW --> VM
+    VM -->|uses| UC
+    VM -->|uses| DP
+    UC -->|uses| MR
+    MR -.implements.- IMR
+    DP -.implements.- SCD
+    DP -.implements.- GCD
+
+    classDef core fill:#d4edda,stroke:#155724,color:#000
+    classDef port fill:#cce5ff,stroke:#004085,color:#000
+    classDef adapter fill:#e2e3e5,stroke:#383d41,color:#000
+    classDef ui fill:#fff3cd,stroke:#856404,color:#000
+    class UC,MT,VE core
+    class MR,DP port
+    class IMR,SCD,GCD adapter
+    class VW,VM ui
+```
+
+## Project layout
+
+The same file layout is used on every stage branch. Files marked with **⚠** change shape between stages.
+
+```
+AsyncLeakDemo/
+├── AsyncLeakDemoApp.swift          composition root — wires the object graph
+├── ContentView.swift
+├── Domain/
+│   ├── MovieTitle.swift            value object
+│   ├── ValidationError.swift
+│   └── AddFavoriteUseCase.swift    ⚠ sync on stages 1, 3, 4 — async on stage 2
+├── Repository/
+│   ├── MovieRepository.swift       ⚠ protocol — sync or async per stage
+│   └── InMemoryMovieRepository.swift  ⚠ Thread.sleep / Task.sleep
+├── Presentation/
+│   ├── AddFavoriteView.swift       includes a MainThreadHeartbeat
+│   └── AddFavoriteViewModel.swift  ⚠ uses Dispatcher on stages 3, 4
+└── Infrastructure/                 stages 3 and 4 only
+    ├── Dispatcher.swift                 port
+    ├── SwiftConcurrencyDispatcher.swift  adapter — Task.detached
+    └── GCDDispatcher.swift               adapter — DispatchQueue.global (stage 4)
+
+AsyncLeakDemoTests/
+├── AddFavoriteUseCaseTests.swift   ⚠ sync on stages 1, 3, 4 — async on stage 2
+└── FakeMovieRepository.swift       ⚠ class on stages 1, 3, 4 — actor on stage 2
+```
+
+`AddFavoriteView` shows a small *MainThreadHeartbeat* — a `TimelineView(.animation)`-driven rotating icon and millisecond clock — so any time the main thread is blocked, the freeze is visible to the eye. On Stage 1 the heartbeat halts mid-rotation; on Stages 2–4 it continues to tick during a save.
+
+## Comparing the stages
+
+A few `git diff` invocations make the architectural deltas concrete.
+
+The `async` propagation between Stages 1 and 2 — note how a sync `@Test` becomes an async one and the fake repository becomes an `actor`:
+
+```sh
+git diff v1-sync v2-leak -- AsyncLeakDemoTests/AddFavoriteUseCaseTests.swift \
+                            AsyncLeakDemoTests/FakeMovieRepository.swift
+```
+
+The domain layer between Stages 1 and 3, after the dispatcher boundary is introduced — the diff is empty, because the domain is identical:
+
+```sh
+git diff v1-sync v3-fix -- AsyncLeakDemo/Domain/ \
+                           AsyncLeakDemo/Repository/ \
+                           AsyncLeakDemoTests/
+```
+
+The composition root between Stages 3 and 4 — a one-line change swaps the execution strategy:
 
 ```sh
 git diff v3-fix v4-execution -- AsyncLeakDemo/AsyncLeakDemoApp.swift
 ```
 
-One line. *"Stage 3 fixed the architecture. Stage 4 fixed the execution. Async didn't belong in the domain — it belonged at the boundary. Once we moved it there, everything got simpler — and swappable."*
+## Running locally
 
-## File structure (identical across all branches)
+Requirements: **Xcode 26.1+** (iOS 26.1 SDK, Swift 5+).
 
-```
-AsyncLeakDemo/
-  AsyncLeakDemoApp.swift              composition root
-  ContentView.swift
-  Domain/
-    MovieTitle.swift
-    ValidationError.swift
-    AddFavoriteUseCase.swift          ⚠ signature changes per stage
-  Repository/
-    MovieRepository.swift             ⚠ protocol changes per stage
-    InMemoryMovieRepository.swift     ⚠ Thread.sleep / Task.sleep / Thread.sleep
-  Presentation/
-    AddFavoriteView.swift             always shows ProgressView spinner
-    AddFavoriteViewModel.swift
-  Infrastructure/                     stages 3+ only
-    Dispatcher.swift
-    SwiftConcurrencyDispatcher.swift
-    GCDDispatcher.swift               stage 4 only
-AsyncLeakDemoTests/
-  AddFavoriteUseCaseTests.swift       ⚠ THE killer slide
-  FakeMovieRepository.swift           ⚠ class / actor / class
+```sh
+git clone https://github.com/oliver-perez/AsyncLeakDemo.git
+cd AsyncLeakDemo
+open AsyncLeakDemo.xcodeproj
 ```
 
-## Running
+Pick a stage with `git checkout <branch>` (or `git checkout <tag>` to detach), then build and run on an iOS simulator. Type a movie title (≥ 2 characters) and tap **Save**:
 
-Open `AsyncLeakDemo.xcodeproj` in Xcode. Pick any stage branch. Build and run on an iOS 26.1+ simulator. Type a movie title (≥ 2 chars) and tap **Save** — Stage 1 will visibly freeze; Stages 2–4 won't.
+- On `stage-1-sync-baseline`, the heartbeat row visibly freezes for ~1.5 seconds.
+- On `stage-2-async-leak`, `stage-3-dispatcher-fix`, and `stage-4-execution-strategies`, the heartbeat keeps ticking smoothly during the save.
 
-## Vocabulary used in the talk
+Tests can be run with the Xcode test action, or from the command line:
 
-- **Async contamination** — the symptom: `async` spreading from infrastructure into domain code that has no asynchronous nature.
-- **Boundary** — where async should live (composition root + dispatcher), not "wrapper" or "layer".
-- **Execution strategy** — the pluggable thing in Stage 4 (Swift Concurrency vs GCD vs other), not "variant".
+```sh
+xcodebuild -project AsyncLeakDemo.xcodeproj \
+           -scheme AsyncLeakDemo \
+           -destination 'platform=iOS Simulator,name=iPhone 17' \
+           test
+```
 
-## Why this works — the principles in play
+## Design principles in play
 
-This demo is small enough to show on one slide, but the architecture isn't novel. It's a faithful application of five well-known ideas from the last two decades of software design. Each is named below with its source and tied to a specific type or file in this repo. The point is to give you accurate names — so when someone asks *"what pattern is this?"* you don't reach for the wrong one.
+The architecture is a faithful application of five well-known ideas. Each is named below with its source and tied to a specific type or file in this repo.
 
-### 1. Hexagonal Architecture / Ports & Adapters
+### Hexagonal Architecture / Ports & Adapters
 
 *Alistair Cockburn, 2005.*
 
-The strongest fit for this demo. Hexagonal Architecture says: put the application core at the center, and let everything that talks to the outside world (databases, networks, threads, UI) plug into it through *ports* (interfaces) implemented by *adapters* (concrete classes).
+Hexagonal Architecture places the application core at the center and lets everything that talks to the outside world plug into it through *ports* (interfaces) implemented by *adapters* (concrete classes).
 
 In this repo:
 
 - `MovieRepository` is a port. `InMemoryMovieRepository` is an adapter for it.
 - `Dispatcher` is a port. `SwiftConcurrencyDispatcher` and `GCDDispatcher` are two adapters for the same port.
 
-Stage 4 adding `GCDDispatcher` without changing the domain *is* the ports & adapters guarantee in action: same hex, different plug.
+Stage 4 adding `GCDDispatcher` without changing the domain is the ports-and-adapters guarantee in action: same hex, different plug.
 
-### 2. Clean Architecture's Dependency Rule
+### Clean Architecture's Dependency Rule
 
-*Robert C. Martin ("Uncle Bob"), 2012 blog post / 2017 book.*
+*Robert C. Martin, 2012 blog post / 2017 book.*
 
-The rule: **source-code dependencies must point only inward**, toward higher-level policy. Frameworks, async runtimes, and I/O libraries are outer-ring concerns; the domain is the innermost ring and must not import them.
+Source-code dependencies must point only inward, toward higher-level policy. Frameworks, async runtimes, and I/O libraries are outer-ring concerns; the domain is the innermost ring and must not import them.
 
-Open `AsyncLeakDemo/Domain/` and grep for imports — you'll find `import Foundation` and nothing else. No `Combine`, no `URLSession`, no `_Concurrency`-specific types. That's the rule satisfied. On Stage 2's branch, the same grep shows the domain still only imports Foundation, but now its *signatures* carry `async` — that's the contamination, even though the import list looks clean. The Dependency Rule is about both imports *and* signatures.
+`AsyncLeakDemo/Domain/` only imports `Foundation`. It does not import `Combine`, `URLSession`, or anything async-related. On Stage 2 the import list looks identical, but the *signatures* now carry `async` — that's the contamination, even though the imports are clean. The Dependency Rule is about both imports and signatures.
 
-### 3. Functional Core, Imperative Shell
+### Functional Core, Imperative Shell
 
 *Gary Bernhardt, "Boundaries" — RubyConf 2012.*
 
-Probably the cleanest mental model for what this talk is teaching:
+A simple two-layer mental model:
 
-- **Functional core** — `Domain/AddFavoriteUseCase.swift`. Pure, deterministic, synchronous. Given the same input, returns the same output. Trivially testable, no test doubles needed beyond a fake repository that just appends to an array.
-- **Imperative shell** — `AsyncLeakDemoApp.swift` (composition root) plus `Infrastructure/*Dispatcher.swift`. Where side effects, threading, and async live. Hard to test, but small.
+- **Functional core** — `Domain/AddFavoriteUseCase.swift`. Pure, deterministic, synchronous. Trivially testable; no test doubles needed beyond a fake repository that just appends to an array.
+- **Imperative shell** — `AsyncLeakDemoApp.swift` (composition root) plus `Infrastructure/*Dispatcher.swift`. Side effects, threading, async — the parts that talk to the world. Hard to test, but small and isolated.
 
-The "boundary" word the talk uses is exactly where these two meet. Stages 1 and 3 have the same functional core; only the imperative shell changes.
+Stages 1 and 3 share the same functional core; only the imperative shell differs.
 
-### 4. SOLID — specifically SRP, DIP, and OCP
+### SOLID — specifically SRP, DIP, and OCP
 
-*Robert C. Martin, formalized in* Agile Software Development *(2002).*
+*Robert C. Martin,* Agile Software Development *(2002).*
 
-Three of the five SOLID letters apply directly here:
+- **SRP (Single Responsibility Principle).** `Dispatcher` exists to do one thing: execute synchronous work asynchronously. `AddFavoriteUseCase` exists to validate input and delegate persistence. Neither has a second reason to change; threading and validation never co-change in this repo.
+- **DIP (Dependency Inversion Principle).** `AddFavoriteUseCase` depends on `any MovieRepository`, never on `InMemoryMovieRepository`. The view model depends on `any Dispatcher`, never on `Task.detached` or `DispatchQueue`. Concrete types appear only at the composition root.
+- **OCP (Open/Closed Principle).** Stage 4 introduced `GCDDispatcher` without modifying any existing type. The composition root changed by one line, but composition roots are *meant* to change when wiring new things in.
 
-- **SRP (Single Responsibility Principle)** — `Dispatcher` exists to do one thing: execute synchronous work asynchronously. `AddFavoriteUseCase` exists to do one thing: validate input and delegate persistence. Neither type has a second reason to change. Threading and validation never co-change in this repo, by design.
-- **DIP (Dependency Inversion Principle)** — `AddFavoriteUseCase` depends on `any MovieRepository`, never on `InMemoryMovieRepository`. The view model depends on `any Dispatcher`, never on `Task.detached` or `DispatchQueue`. The composition root is the only place concrete types appear, and that's correct.
-- **OCP (Open/Closed Principle)** — Stage 4 introduced `GCDDispatcher` without modifying any existing type. The composition root changed by one line, but composition roots are *meant* to change when you wire new things; that's not an OCP violation, that's the system being open to extension at the right seam.
+LSP and ISP are not particularly exercised in such a small example.
 
-The remaining two SOLID letters (LSP, ISP) aren't really exercised here — both `Dispatcher` adapters are interchangeable (LSP-clean by construction), and the protocol surface is so small there's nothing to segregate.
-
-### 5. DDD — partial fit, named honestly
+### DDD — partial fit
 
 *Eric Evans,* Domain-Driven Design *(2003).*
 
-You reached for DDD, and you weren't wrong to — but the fit is partial, and naming this *DDD* would oversell it. What this demo borrows from DDD:
+The example uses a few DDD building blocks:
 
 - **Repository pattern** — `MovieRepository` as an abstraction over persistence.
-- **Value object** — `MovieTitle` is a small immutable type defined by its value, not its identity.
-- **Use case / Application Service** style — `AddFavoriteUseCase` orchestrates a single user-driven operation.
+- **Value object** — `MovieTitle` is an immutable type defined by its value, not its identity.
+- **Application service / use case** — `AddFavoriteUseCase` orchestrates a single user-driven operation.
 
-What this demo does **not** exercise (and what DDD is mostly about):
-
-- Aggregates and aggregate roots.
-- Domain events.
-- Bounded contexts and context maps.
-- Ubiquitous language coordinated with domain experts.
-
-The instinct *"keep infrastructure out of the domain so the domain can be reasoned about on its own terms"* is sometimes credited to DDD in casual conversation, but it's actually **Hexagonal / Clean Architecture**. DDD is fundamentally about *modeling the problem*; Hexagonal/Clean are about *structuring the solution*. They compose well, which is why they often get conflated.
+What this repo does *not* exercise — and what DDD is mostly about — is aggregates and aggregate roots, domain events, bounded contexts and context maps, and ubiquitous language coordinated with domain experts. The instinct *"keep infrastructure out of the domain"* is sometimes credited to DDD in casual conversation, but it more accurately belongs to Hexagonal / Clean Architecture. DDD is fundamentally about *modeling the problem*; Hexagonal/Clean are about *structuring the solution*.
 
 ### Tying it together
 
-All five ideas converge on the same shape: **the domain is a small, stable thing that knows nothing about how its work runs.** Hexagonal calls the seams "ports". Clean calls them "boundaries". Bernhardt calls them the line between "functional core" and "imperative shell". SOLID's DIP says to depend on the abstractions on either side of those seams.
+All five ideas converge on the same shape: **the domain is a small, stable thing that knows nothing about how its work runs.** Hexagonal calls the seams "ports". Clean calls them "boundaries". Bernhardt calls them the line between functional core and imperative shell. SOLID's DIP says to depend on the abstractions on either side of those seams.
 
-When you keep the seams in the right places, swapping `Task.detached` for `DispatchQueue.global` is a one-line change in the composition root — because the only thing that knew about either was the composition root.
+When the seams are in the right places, swapping `Task.detached` for `DispatchQueue.global` is a one-line change — because the only place that knew about either was the composition root.
+
+## Glossary
+
+- **Async contamination** — `async` spreading from infrastructure into domain code that has no asynchronous work of its own.
+- **Boundary** — the place where async work is contained, typically the composition root plus a dispatcher abstraction.
+- **Composition root** — the single place that wires concrete implementations into the object graph (`AsyncLeakDemoApp.swift` in this repo).
+- **Cooperative thread pool** — Swift Concurrency's shared pool of worker threads. Blocking I/O on this pool can starve other tasks; `DispatchQueue.global` does not share it.
+- **Execution strategy** — the concrete adapter behind the `Dispatcher` port; what does the suspending. `Task.detached`, `DispatchQueue.global`, and others are interchangeable strategies.
+- **Port / Adapter** — Hexagonal Architecture terms. A port is an interface defined by the application core; an adapter is a concrete implementation that fulfils the port using an outside technology.
