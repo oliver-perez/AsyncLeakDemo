@@ -112,6 +112,8 @@ flowchart TB
         IMR[InMemoryMovieRepository]
         SCD[SwiftConcurrencyDispatcher]
         GCD[GCDDispatcher]
+        CMB[CombineDispatcher]
+        CLS[ClosureDispatcher]
     end
 
     subgraph Driving ["Driving side (UI)"]
@@ -126,6 +128,8 @@ flowchart TB
     MR -.implements.- IMR
     DP -.implements.- SCD
     DP -.implements.- GCD
+    DP -.implements.- CMB
+    DP -.implements.- CLS
 
     classDef core fill:#d4edda,stroke:#155724,color:#000
     classDef port fill:#cce5ff,stroke:#004085,color:#000
@@ -133,9 +137,20 @@ flowchart TB
     classDef ui fill:#fff3cd,stroke:#856404,color:#000
     class UC,MT,VE core
     class MR,DP port
-    class IMR,SCD,GCD adapter
+    class IMR,SCD,GCD,CMB,CLS adapter
     class VW,VM ui
 ```
+
+### Execution strategies — the four Dispatcher adapters
+
+The `Dispatcher` port has four interchangeable adapters. Switching between them is a one-line change in the composition root; nothing else moves.
+
+| Adapter                       | Mechanism                                                | When to choose it                                                                       |
+| ----------------------------- | -------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `SwiftConcurrencyDispatcher`  | `Task.detached(priority:)`                               | Non-blocking work that fits Swift Concurrency's structured model.                       |
+| `GCDDispatcher`               | `DispatchQueue.global().async` + checked continuation    | Blocking I/O (`Thread.sleep`, sync DB drivers, blocking C libraries) where the cooperative pool must not be starved. Production default in this repo. |
+| `CombineDispatcher`           | `Future` on a queue, bridged back to async               | When surrounding code is already Combine-shaped and composing publishers is desirable.  |
+| `ClosureDispatcher`           | Caller-supplied scheduling closure, bridged via continuation | Bridging callback-based APIs, third-party SDKs, or C interop.                       |
 
 ## Project layout
 
@@ -157,8 +172,10 @@ AsyncLeakDemo/
 │   └── AddFavoriteViewModel.swift  ⚠ uses Dispatcher on stages 3, 4
 └── Infrastructure/                 stages 3 and 4 only
     ├── Dispatcher.swift                 port
-    ├── SwiftConcurrencyDispatcher.swift  adapter — Task.detached
-    └── GCDDispatcher.swift               adapter — DispatchQueue.global (stage 4)
+    ├── SwiftConcurrencyDispatcher.swift  adapter — Task.detached (stage 3)
+    ├── GCDDispatcher.swift               adapter — DispatchQueue.global (stage 4)
+    ├── CombineDispatcher.swift           adapter — Future + queue (stage 4)
+    └── ClosureDispatcher.swift           adapter — schedule-with-closure (stage 4)
 
 AsyncLeakDemoTests/
 ├── AddFavoriteUseCaseTests.swift   ⚠ sync on stages 1, 3, 4 — async on stage 2
@@ -229,9 +246,9 @@ Hexagonal Architecture places the application core at the center and lets everyt
 In this repo:
 
 - `MovieRepository` is a port. `InMemoryMovieRepository` is an adapter for it.
-- `Dispatcher` is a port. `SwiftConcurrencyDispatcher` and `GCDDispatcher` are two adapters for the same port.
+- `Dispatcher` is a port. `SwiftConcurrencyDispatcher`, `GCDDispatcher`, `CombineDispatcher`, and `ClosureDispatcher` are four adapters for the same port. Each picks a different mechanism (Swift Concurrency, GCD, Combine, raw callback scheduling) without the domain noticing.
 
-Stage 4 adding `GCDDispatcher` without changing the domain is the ports-and-adapters guarantee in action: same hex, different plug.
+Adding new dispatchers without changing the domain is the ports-and-adapters guarantee in action: same hex, different plug.
 
 ### Clean Architecture's Dependency Rule
 
